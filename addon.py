@@ -1944,8 +1944,9 @@ class BlenderMCPServer:
                         "message": "Hunyuan3D integration is enabled and mode is not supported."
                     }
             return {
-                "enabled": True, 
+                "enabled": True,
                 "mode": hunyuan3d_mode,
+                "api_type": bpy.context.scene.blendermcp_hunyuan3d_api_type if hunyuan3d_mode == "OFFICIAL_API" else None,
                 "message": "Hunyuan3D integration is enabled and ready to use."
             }
         return {
@@ -2061,12 +2062,22 @@ class BlenderMCPServer:
             # Parameter verification
             if not text_prompt and not image:
                 return {"error": "Prompt or Image is required"}
-            if text_prompt and image:
+
+            # Get API type (Pro or Rapid)
+            api_type = bpy.context.scene.blendermcp_hunyuan3d_api_type
+
+            # Rapid mode only supports image input, not text prompt
+            if api_type == "RAPID" and text_prompt and not image:
+                return {"error": "Rapid mode only supports image input, not text prompt"}
+
+            # Pro mode supports both text and image, but not simultaneously
+            if api_type == "PRO" and text_prompt and image:
                 return {"error": "Prompt and Image cannot be provided simultaneously"}
-            # Fixed parameter configuration
-            service = "hunyuan"
-            action = "SubmitHunyuanTo3DJob"
-            version = "2023-09-01"
+
+            # Fixed parameter configuration - Updated for new API
+            service = "ai3d"
+            action = "SubmitHunyuanTo3DProJob" if api_type == "PRO" else "SubmitHunyuanTo3DRapidJob"
+            version = "2025-05-13"
             region = "ap-guangzhou"
 
             headParams={
@@ -2076,14 +2087,12 @@ class BlenderMCPServer:
             }
 
             # Constructing request parameters
-            data = {
-                "Num": 1  # The current API limit is only 1
-            }
+            data = {}
 
             # Handling text prompts
             if text_prompt:
-                if len(text_prompt) > 200:
-                    return {"error": "Prompt exceeds 200 characters limit"}
+                if len(text_prompt) > 1024:
+                    return {"error": "Prompt exceeds 1024 characters limit"}
                 data["Prompt"] = text_prompt
 
             # Handling image
@@ -2098,7 +2107,7 @@ class BlenderMCPServer:
                         data["ImageBase64"] = image_base64
                     except Exception as e:
                         return {"error": f"Image encoding failed: {str(e)}"}
-            
+
             # Get signed headers
             headers, endpoint = self.get_tencent_cloud_sign_headers("POST", "/", headParams, data, service, region, secret_id, secret_key)
 
@@ -2211,9 +2220,11 @@ class BlenderMCPServer:
             if not job_id:
                 return {"error": "JobId is required"}
             
-            service = "hunyuan"
-            action = "QueryHunyuanTo3DJob"
-            version = "2023-09-01"
+            # Get API type and configure service parameters
+            api_type = bpy.context.scene.blendermcp_hunyuan3d_api_type
+            service = "ai3d"
+            action = "QueryHunyuanTo3DProJob" if api_type == "PRO" else "QueryHunyuanTo3DRapidJob"
+            version = "2025-05-13"
             region = "ap-guangzhou"
 
             headParams={
@@ -2386,6 +2397,7 @@ class BLENDERMCP_PT_Panel(bpy.types.Panel):
             if scene.blendermcp_hunyuan3d_mode == 'OFFICIAL_API':
                 layout.prop(scene, "blendermcp_hunyuan3d_secret_id", text="SecretId")
                 layout.prop(scene, "blendermcp_hunyuan3d_secret_key", text="SecretKey")
+                layout.prop(scene, "blendermcp_hunyuan3d_api_type", text="API Type")
             if scene.blendermcp_hunyuan3d_mode == 'LOCAL_API':
                 layout.prop(scene, "blendermcp_hunyuan3d_api_url", text="API URL")
                 layout.prop(scene, "blendermcp_hunyuan3d_octree_resolution", text="Octree Resolution")
@@ -2525,6 +2537,16 @@ def register():
         default="LOCAL_API"
     )
 
+    bpy.types.Scene.blendermcp_hunyuan3d_api_type = bpy.props.EnumProperty(
+        name="API Type",
+        description="Choose API type for official API mode",
+        items=[
+            ("PRO", "Pro", "Text-to-3D & Image-to-3D, 3 concurrent tasks, max 1024 chars prompt"),
+            ("RAPID", "Rapid", "Image-to-3D only, faster generation, 1 concurrent task"),
+        ],
+        default="PRO"
+    )
+
     bpy.types.Scene.blendermcp_hunyuan3d_secret_id = bpy.props.StringProperty(
         name="Hunyuan 3D SecretId",
         description="SecretId provided by Hunyuan 3D",
@@ -2621,6 +2643,7 @@ def unregister():
     del bpy.types.Scene.blendermcp_sketchfab_api_key
     del bpy.types.Scene.blendermcp_use_hunyuan3d
     del bpy.types.Scene.blendermcp_hunyuan3d_mode
+    del bpy.types.Scene.blendermcp_hunyuan3d_api_type
     del bpy.types.Scene.blendermcp_hunyuan3d_secret_id
     del bpy.types.Scene.blendermcp_hunyuan3d_secret_key
     del bpy.types.Scene.blendermcp_hunyuan3d_api_url
