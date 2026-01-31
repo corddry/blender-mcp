@@ -2074,11 +2074,11 @@ class BlenderMCPServer:
             if api_type == "PRO" and text_prompt and image:
                 return {"error": "Prompt and Image cannot be provided simultaneously"}
 
-            # Fixed parameter configuration - Updated for new API
-            service = "ai3d"
+            # Fixed parameter configuration - International endpoint
+            service = "hunyuan"
             action = "SubmitHunyuanTo3DProJob" if api_type == "PRO" else "SubmitHunyuanTo3DRapidJob"
-            version = "2025-05-13"
-            region = "ap-guangzhou"
+            version = "2023-09-01"
+            region = "ap-singapore"
 
             headParams={
                 "Action": action,
@@ -2109,7 +2109,7 @@ class BlenderMCPServer:
                         return {"error": f"Image encoding failed: {str(e)}"}
 
             # Get signed headers
-            headers, endpoint = self.get_tencent_cloud_sign_headers("POST", "/", headParams, data, service, region, secret_id, secret_key)
+            headers, endpoint = self.get_tencent_cloud_sign_headers("POST", "/", headParams, data, service, region, secret_id, secret_key, host="hunyuan.intl.tencentcloudapi.com")
 
             response = requests.post(
                 endpoint,
@@ -2222,10 +2222,10 @@ class BlenderMCPServer:
             
             # Get API type and configure service parameters
             api_type = bpy.context.scene.blendermcp_hunyuan3d_api_type
-            service = "ai3d"
+            service = "hunyuan"
             action = "QueryHunyuanTo3DProJob" if api_type == "PRO" else "QueryHunyuanTo3DRapidJob"
-            version = "2025-05-13"
-            region = "ap-guangzhou"
+            version = "2023-09-01"
+            region = "ap-singapore"
 
             headParams={
                 "Action": action,
@@ -2238,7 +2238,7 @@ class BlenderMCPServer:
                 "JobId": clean_job_id
             }
 
-            headers, endpoint = self.get_tencent_cloud_sign_headers("POST", "/", headParams, data, service, region, secret_id, secret_key)
+            headers, endpoint = self.get_tencent_cloud_sign_headers("POST", "/", headParams, data, service, region, secret_id, secret_key, host="hunyuan.intl.tencentcloudapi.com")
 
             response = requests.post(
                 endpoint,
