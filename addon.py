@@ -144,6 +144,34 @@ class BlenderMCPServer:
                         command = json.loads(buffer.decode('utf-8'))
                         buffer = b''
 
+                        # Pre-download files on this background thread so
+                        # the Blender main thread only handles the fast import.
+                        cmd_type = command.get("type")
+                        params = command.get("params", {})
+                        if cmd_type == "import_part_asset_hunyuan":
+                            file_url = params.get("file_url", "")
+                            file_type = params.get("file_type", "OBJ")
+                            try:
+                                temp_dir = tempfile.mkdtemp(prefix="part_")
+                                ext = file_type.lower()
+                                local_path = os.path.join(temp_dir, f"part_model.{ext}")
+                                dl_resp = requests.get(file_url, stream=True)
+                                dl_resp.raise_for_status()
+                                with open(local_path, "wb") as f:
+                                    for chunk in dl_resp.iter_content(chunk_size=8192):
+                                        f.write(chunk)
+                                command["params"]["_local_file_path"] = local_path
+                            except Exception as e:
+                                error_response = {
+                                    "status": "error",
+                                    "message": f"Background download failed: {str(e)}"
+                                }
+                                try:
+                                    client.sendall(json.dumps(error_response).encode('utf-8'))
+                                except:
+                                    pass
+                                continue
+
                         # Execute command in Blender's main thread
                         def execute_wrapper():
                             try:
@@ -253,6 +281,9 @@ class BlenderMCPServer:
                 "poll_hunyuan_retopology_job": self.poll_hunyuan_retopology_job,
                 "import_retopologized_asset_hunyuan": self.import_retopologized_asset_hunyuan,
                 "bake_textures_to_retopo": self.bake_textures_to_retopo,
+                "submit_hunyuan_part_job": self.submit_hunyuan_part_job,
+                "poll_hunyuan_part_job": self.poll_hunyuan_part_job,
+                "import_part_asset_hunyuan": self.import_part_asset_hunyuan,
             }
             handlers.update(hunyuan_handlers)
 
@@ -2678,6 +2709,180 @@ class BlenderMCPServer:
             bpy.context.scene.render.engine = original_engine
             if original_samples is not None and hasattr(bpy.context.scene, 'cycles'):
                 bpy.context.scene.cycles.samples = original_samples
+
+    def submit_hunyuan_part_job(self, file_url: str, file_type: str = "FBX"):
+        """Submit a part decomposition job via Tencent Cloud API."""
+        try:
+            secret_id = bpy.context.scene.blendermcp_hunyuan3d_secret_id
+            secret_key = bpy.context.scene.blendermcp_hunyuan3d_secret_key
+
+            if not secret_id or not secret_key:
+                return {"error": "SecretId or SecretKey is not given"}
+
+            if not file_url:
+                return {"error": "file_url is required"}
+
+            service = "hunyuan"
+            action = "SubmitHunyuan3DPartJob"
+            version = "2023-09-01"
+            region = "ap-singapore"
+
+            headParams = {
+                "Action": action,
+                "Version": version,
+                "Region": region,
+            }
+
+            data = {
+                "File": {
+                    "Url": file_url,
+                    "Type": file_type,
+                },
+            }
+
+            headers, endpoint = self.get_tencent_cloud_sign_headers(
+                "POST", "/", headParams, data, service, region, secret_id, secret_key,
+                host="hunyuan.intl.tencentcloudapi.com"
+            )
+
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                data=json.dumps(data)
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            return {
+                "error": f"API request failed with status {response.status_code}: {response.text}"
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def poll_hunyuan_part_job(self, job_id: str):
+        """Poll the status of a part decomposition job."""
+        try:
+            secret_id = bpy.context.scene.blendermcp_hunyuan3d_secret_id
+            secret_key = bpy.context.scene.blendermcp_hunyuan3d_secret_key
+
+            if not secret_id or not secret_key:
+                return {"error": "SecretId or SecretKey is not given"}
+            if not job_id:
+                return {"error": "JobId is required"}
+
+            service = "hunyuan"
+            action = "QueryHunyuan3DPartJob"
+            version = "2023-09-01"
+            region = "ap-singapore"
+
+            headParams = {
+                "Action": action,
+                "Version": version,
+                "Region": region,
+            }
+
+            clean_job_id = job_id.removeprefix("part_")
+            data = {
+                "JobId": clean_job_id
+            }
+
+            headers, endpoint = self.get_tencent_cloud_sign_headers(
+                "POST", "/", headParams, data, service, region, secret_id, secret_key,
+                host="hunyuan.intl.tencentcloudapi.com"
+            )
+
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                data=json.dumps(data)
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            return {
+                "error": f"API request failed with status {response.status_code}: {response.text}"
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def import_part_asset_hunyuan(self, name: str, file_url: str, file_type: str = "OBJ", _local_file_path: str = None):
+        """Download and import a part-decomposed 3D file (OBJ or FBX).
+
+        If _local_file_path is provided (pre-downloaded on a background thread),
+        the download step is skipped and the local file is imported directly.
+        """
+        if _local_file_path:
+            # File was already downloaded on the background client thread
+            file_path = _local_file_path
+        else:
+            if not file_url:
+                return {"error": "file_url is required"}
+
+            if not re.match(r'^https?://', file_url, re.IGNORECASE):
+                return {"error": "Invalid URL format. Must start with http:// or https://"}
+
+            temp_dir = tempfile.mkdtemp(prefix="part_")
+            ext = file_type.lower()
+            file_path = osp.join(temp_dir, f"part_model.{ext}")
+
+            try:
+                response = requests.get(file_url, stream=True)
+                response.raise_for_status()
+                with open(file_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            except Exception as e:
+                return {"succeed": False, "error": f"Download failed: {str(e)}"}
+
+        if not osp.exists(file_path):
+            return {"succeed": False, "error": "Failed to download file"}
+
+        try:
+            if file_type.upper() == "FBX":
+                bpy.ops.import_scene.fbx(filepath=file_path)
+            else:
+                # OBJ import - version-aware
+                if bpy.app.version >= (4, 0, 0):
+                    bpy.ops.wm.obj_import(filepath=file_path)
+                else:
+                    bpy.ops.import_scene.obj(filepath=file_path)
+
+            imported_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+            if not imported_objs:
+                return {"succeed": False, "error": "No mesh objects imported"}
+
+            obj = imported_objs[0]
+            if name:
+                obj.name = name
+
+            mesh = obj.data
+            result = {
+                "succeed": True,
+                "name": obj.name,
+                "type": obj.type,
+                "location": [obj.location.x, obj.location.y, obj.location.z],
+                "rotation": [obj.rotation_euler.x, obj.rotation_euler.y, obj.rotation_euler.z],
+                "scale": [obj.scale.x, obj.scale.y, obj.scale.z],
+                "mesh_stats": {
+                    "vertices": len(mesh.vertices),
+                    "edges": len(mesh.edges),
+                    "polygons": len(mesh.polygons),
+                },
+            }
+
+            if obj.type == "MESH":
+                bounding_box = self._get_aabb(obj)
+                result["world_bounding_box"] = bounding_box
+
+            return result
+        except Exception as e:
+            return {"succeed": False, "error": str(e)}
+        finally:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception as e:
+                print(f"Failed to clean up temporary file {file_path}: {e}")
 
     #endregion
 

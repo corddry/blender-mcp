@@ -1233,6 +1233,106 @@ def bake_textures_to_retopo(
         return f"Error baking textures: {str(e)}"
 
 
+@mcp.tool()
+async def submit_hunyuan_part_job(
+    ctx: Context,
+    file_url: str,
+    object_name: str = None,
+):
+    """
+    Submit a part decomposition job for a 3D model via Tencent Cloud Hunyuan3D.
+    This takes an FBX model and automatically decomposes it into component parts.
+
+    Parameters:
+    - file_url: URL of the input FBX file (e.g. from a previous Hunyuan3D generation result). Recommended ≤100MB, ≤30K faces.
+    - object_name: (Optional) Name of the Blender object this decomposition is for, used for tracking.
+
+    Returns a job_id (prefixed with "part_") and the original_object_name for later use.
+    """
+    try:
+        blender = get_blender_connection()
+        result = await asyncio.to_thread(
+            blender.send_command, "submit_hunyuan_part_job", {
+                "file_url": file_url,
+                "file_type": "FBX",
+            }
+        )
+        if "Response" in result and "JobId" in result["Response"]:
+            job_id = result["Response"]["JobId"]
+            formatted_job_id = f"part_{job_id}"
+            return json.dumps({
+                "job_id": formatted_job_id,
+                "original_object_name": object_name,
+            })
+        return json.dumps(result)
+    except Exception as e:
+        logger.error(f"Error submitting part decomposition job: {str(e)}")
+        return f"Error submitting part decomposition job: {str(e)}"
+
+
+@mcp.tool()
+async def poll_hunyuan_part_job(
+    ctx: Context,
+    job_id: str,
+):
+    """
+    Check if a Hunyuan3D part decomposition job has completed.
+
+    Parameters:
+    - job_id: The job_id returned by submit_hunyuan_part_job (prefixed with "part_").
+
+    Returns the job status. Possible states: WAIT, RUN, DONE, FAIL.
+    When status is "DONE", the response includes ResultFile3Ds containing the decomposed part URLs.
+    ResultFile3Ds contains mixed types: OBJ and FBX files for 3D parts, plus IMAGE entries for previews.
+    This is a polling API — only proceed when the status reaches a terminal state ("DONE" or "FAIL").
+    """
+    try:
+        blender = get_blender_connection()
+        result = await asyncio.to_thread(
+            blender.send_command, "poll_hunyuan_part_job", {
+                "job_id": job_id,
+            }
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error polling part decomposition job: {str(e)}")
+        return f"Error polling part decomposition job: {str(e)}"
+
+
+@mcp.tool()
+async def import_part_asset_hunyuan(
+    ctx: Context,
+    name: str,
+    file_url: str,
+    file_type: str = "OBJ",
+):
+    """
+    Import a single decomposed part from a Hunyuan3D part decomposition job into Blender.
+
+    Parameters:
+    - name: The name to give the imported part object in the scene.
+    - file_url: The file URL from ResultFile3Ds (OBJ or FBX entry).
+    - file_type: Format of the file — "OBJ" or "FBX". Default: "OBJ".
+
+    Call this once per 3D part in ResultFile3Ds, skipping any IMAGE entries.
+    Each part is imported as a new separate object (not replacing anything).
+    Returns mesh stats (vertex, edge, polygon counts) and bounding box.
+    """
+    try:
+        blender = get_blender_connection()
+        result = await asyncio.to_thread(
+            blender.send_command, "import_part_asset_hunyuan", {
+                "name": name,
+                "file_url": file_url,
+                "file_type": file_type,
+            }
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error importing part asset: {str(e)}")
+        return f"Error importing part asset: {str(e)}"
+
+
 @mcp.prompt()
 def asset_creation_strategy() -> str:
     """Defines the preferred strategy for creating assets in Blender"""
@@ -1318,6 +1418,19 @@ def asset_creation_strategy() -> str:
                             - Bake DIFFUSE first (transfers color/albedo), then optionally NORMAL and ROUGHNESS
                             - The target is auto-UV-unwrapped if it has no UVs
                             - After baking, the source is hidden again (or deleted if delete_source_after=True)
+                    - Part decomposition — use when the user asks to "break apart", "decompose", "split into parts", or "separate components" of a 3D model:
+                        This requires the URL of an existing FBX file (e.g. from a previous Hunyuan3D generation result).
+                        Input must be FBX format, recommended ≤100MB and ≤30K faces.
+                        1. Submit the part decomposition job
+                            - Use submit_hunyuan_part_job() with the FBX file URL
+                            - Optionally pass object_name to track the source object
+                        2. Poll the status
+                            - Use poll_hunyuan_part_job() to check if the decomposition has completed or failed
+                        3. Import each decomposed part
+                            - When DONE, ResultFile3Ds contains multiple entries with mixed types (OBJ, FBX, IMAGE)
+                            - Call import_part_asset_hunyuan() once per 3D file entry (OBJ or FBX), skipping IMAGE entries
+                            - Each part is imported as a new separate object
+                        4. After importing, check bounding boxes and arrange parts as needed
                 if Hunyuan3D mode is "LOCAL_API":
                     - For objects/models, do the following steps:
                         1. Create the model generation task
