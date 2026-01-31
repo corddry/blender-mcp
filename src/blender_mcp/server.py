@@ -1089,6 +1089,150 @@ def import_generated_asset_hunyuan(
         return f"Error generating Hunyuan3D task: {str(e)}"
 
 
+@mcp.tool()
+def submit_hunyuan_retopology_job(
+    ctx: Context,
+    file_url: str,
+    file_type: str = "GLB",
+    polygon_type: str = "triangle",
+    face_level: str = "medium",
+    object_name: str = None,
+):
+    """
+    Submit a smart retopology job for a 3D model via Tencent Cloud Hunyuan3D.
+    This reduces polygon count while preserving shape quality.
+
+    Parameters:
+    - file_url: URL of the input 3D file (e.g. from a previous Hunyuan3D generation result).
+    - file_type: Format of the input file — "GLB" or "OBJ". Default: "GLB".
+    - polygon_type: Output polygon type — "triangle" or "quadrilateral". Default: "triangle".
+    - face_level: Target polygon density — "high", "medium", or "low". Default: "medium".
+    - object_name: (Optional) Name of the Blender object this retopology is for, used to track which object to replace on import.
+
+    Returns a job_id (prefixed with "retopo_") and the original_object_name for later use.
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("submit_hunyuan_retopology_job", {
+            "file_url": file_url,
+            "file_type": file_type,
+            "polygon_type": polygon_type,
+            "face_level": face_level,
+        })
+        if "Response" in result and "JobId" in result["Response"]:
+            job_id = result["Response"]["JobId"]
+            formatted_job_id = f"retopo_{job_id}"
+            return json.dumps({
+                "job_id": formatted_job_id,
+                "original_object_name": object_name,
+            })
+        return json.dumps(result)
+    except Exception as e:
+        logger.error(f"Error submitting retopology job: {str(e)}")
+        return f"Error submitting retopology job: {str(e)}"
+
+
+@mcp.tool()
+def poll_hunyuan_retopology_job(
+    ctx: Context,
+    job_id: str,
+):
+    """
+    Check if a Hunyuan3D retopology job has completed.
+
+    Parameters:
+    - job_id: The job_id returned by submit_hunyuan_retopology_job (prefixed with "retopo_").
+
+    Returns the job status. Possible states: WAIT, RUN, DONE, FAIL.
+    When status is "DONE", the response includes ResultFile3Ds containing the retopologized model URL(s).
+    This is a polling API — only proceed when the status reaches a terminal state ("DONE" or "FAIL").
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("poll_hunyuan_retopology_job", {
+            "job_id": job_id,
+        })
+        return result
+    except Exception as e:
+        logger.error(f"Error polling retopology job: {str(e)}")
+        return f"Error polling retopology job: {str(e)}"
+
+
+@mcp.tool()
+def import_retopologized_asset_hunyuan(
+    ctx: Context,
+    name: str,
+    obj_file_url: str,
+    replace_object: str = None,
+):
+    """
+    Import a retopologized 3D model from Hunyuan3D into Blender.
+
+    Parameters:
+    - name: The name to give the imported object in the scene.
+    - obj_file_url: The OBJ file URL from the retopology job result (from ResultFile3Ds).
+    - replace_object: (Optional) Name of an existing Blender object to replace in-place.
+      If provided, the original object's location, rotation, and scale are preserved,
+      the original is deleted, and the retopologized model is placed at the same transform.
+
+    Returns mesh stats (vertex, edge, polygon counts) for comparing polycount before and after retopology.
+    """
+    try:
+        blender = get_blender_connection()
+        kwargs = {
+            "name": name,
+            "obj_file_url": obj_file_url,
+        }
+        if replace_object:
+            kwargs["replace_object"] = replace_object
+        result = blender.send_command("import_retopologized_asset_hunyuan", kwargs)
+        return result
+    except Exception as e:
+        logger.error(f"Error importing retopologized asset: {str(e)}")
+        return f"Error importing retopologized asset: {str(e)}"
+
+
+@mcp.tool()
+def bake_textures_to_retopo(
+    ctx: Context,
+    source_object: str,
+    target_object: str,
+    bake_type: str = "DIFFUSE",
+    resolution: int = 2048,
+    cage_extrusion: float = 0.5,
+    delete_source_after: bool = False,
+):
+    """
+    Bake textures from a source (hi-res/textured) mesh onto a target (retopo/untextured) mesh.
+    Uses Cycles Selected-to-Active baking. Automatically UV unwraps the target if it has no UVs.
+
+    Parameters:
+    - source_object: Name of the textured source mesh in Blender (e.g. the original hi-res model).
+    - target_object: Name of the retopologized target mesh to bake onto.
+    - bake_type: Type of bake — "DIFFUSE", "NORMAL", "ROUGHNESS", or "COMBINED". Default: "DIFFUSE".
+    - resolution: Bake image resolution in pixels (width & height). Default: 2048.
+    - cage_extrusion: Ray cast distance for Selected-to-Active projection. Increase if bake has gaps. Default: 0.5.
+    - delete_source_after: If True, delete the source object after baking. If False, hide it. Default: False.
+
+    Returns bake result including image name, material name, and source object status.
+    Typically used after import_retopologized_asset_hunyuan to transfer textures from the hidden original onto the retopo mesh.
+    """
+    try:
+        blender = get_blender_connection()
+        result = blender.send_command("bake_textures_to_retopo", {
+            "source_object": source_object,
+            "target_object": target_object,
+            "bake_type": bake_type,
+            "resolution": resolution,
+            "cage_extrusion": cage_extrusion,
+            "delete_source_after": delete_source_after,
+        })
+        return result
+    except Exception as e:
+        logger.error(f"Error baking textures: {str(e)}")
+        return f"Error baking textures: {str(e)}"
+
+
 @mcp.prompt()
 def asset_creation_strategy() -> str:
     """Defines the preferred strategy for creating assets in Blender"""
@@ -1157,6 +1301,23 @@ def asset_creation_strategy() -> str:
                             - Use poll_hunyuan_job_status() to check if the generation task has completed or failed
                         3. Import the asset
                             - Use import_generated_asset_hunyuan() to import the generated OBJ model the asset
+                    - Retopology (smart topology optimization) — use when the user asks to "retopologize", "reduce polycount", or "optimize mesh":
+                        This requires the URL of an existing 3D file (e.g. from a previous Hunyuan3D generation result).
+                        1. Submit the retopology job
+                            - Use submit_hunyuan_retopology_job() with the file URL, file_type (GLB or OBJ), polygon_type (triangle or quadrilateral), and face_level (high/medium/low)
+                            - Pass the object_name so you can track which object to replace later
+                        2. Poll the status
+                            - Use poll_hunyuan_retopology_job() to check if the retopology task has completed or failed
+                        3. Import the retopologized asset
+                            - Use import_retopologized_asset_hunyuan() with the OBJ URL from ResultFile3Ds
+                            - Use replace_object to swap out the original object in-place (preserves location, rotation, scale)
+                            - The original object is hidden (not deleted) so its textures can be baked onto the retopo mesh
+                            - The result includes mesh_stats and original_hires_name for the hidden source
+                        4. Bake textures from the original onto the retopo mesh
+                            - Use bake_textures_to_retopo() with source_object=original_hires_name and target_object=retopo mesh name
+                            - Bake DIFFUSE first (transfers color/albedo), then optionally NORMAL and ROUGHNESS
+                            - The target is auto-UV-unwrapped if it has no UVs
+                            - After baking, the source is hidden again (or deleted if delete_source_after=True)
                 if Hunyuan3D mode is "LOCAL_API":
                     - For objects/models, do the following steps:
                         1. Create the model generation task

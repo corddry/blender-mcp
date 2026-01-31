@@ -248,7 +248,11 @@ class BlenderMCPServer:
             hunyuan_handlers = {
                 "create_hunyuan_job": self.create_hunyuan_job,
                 "poll_hunyuan_job_status": self.poll_hunyuan_job_status,
-                "import_generated_asset_hunyuan": self.import_generated_asset_hunyuan
+                "import_generated_asset_hunyuan": self.import_generated_asset_hunyuan,
+                "submit_hunyuan_retopology_job": self.submit_hunyuan_retopology_job,
+                "poll_hunyuan_retopology_job": self.poll_hunyuan_retopology_job,
+                "import_retopologized_asset_hunyuan": self.import_retopologized_asset_hunyuan,
+                "bake_textures_to_retopo": self.bake_textures_to_retopo,
             }
             handlers.update(hunyuan_handlers)
 
@@ -2329,6 +2333,352 @@ class BlenderMCPServer:
                     os.remove(obj_file_path)
             except Exception as e:
                 print(f"Failed to clean up temporary directory {temp_dir}: {e}")
+
+    def submit_hunyuan_retopology_job(self, file_url: str, file_type: str = "GLB", polygon_type: str = "triangle", face_level: str = "medium"):
+        """Submit a smart retopology job via Tencent Cloud API."""
+        try:
+            secret_id = bpy.context.scene.blendermcp_hunyuan3d_secret_id
+            secret_key = bpy.context.scene.blendermcp_hunyuan3d_secret_key
+
+            if not secret_id or not secret_key:
+                return {"error": "SecretId or SecretKey is not given"}
+
+            if not file_url:
+                return {"error": "file_url is required"}
+
+            service = "hunyuan"
+            action = "Submit3DSmartTopologyJob"
+            version = "2023-09-01"
+            region = "ap-singapore"
+
+            headParams = {
+                "Action": action,
+                "Version": version,
+                "Region": region,
+            }
+
+            # File3D is an InputFile3D object with Url and Type fields
+            data = {
+                "File3D": {
+                    "Url": file_url,
+                    "Type": file_type,
+                },
+                "PolygonType": polygon_type,
+                "FaceLevel": face_level,
+            }
+
+            headers, endpoint = self.get_tencent_cloud_sign_headers(
+                "POST", "/", headParams, data, service, region, secret_id, secret_key,
+                host="hunyuan.intl.tencentcloudapi.com"
+            )
+
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                data=json.dumps(data)
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            return {
+                "error": f"API request failed with status {response.status_code}: {response.text}"
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def poll_hunyuan_retopology_job(self, job_id: str):
+        """Poll the status of a smart retopology job."""
+        try:
+            secret_id = bpy.context.scene.blendermcp_hunyuan3d_secret_id
+            secret_key = bpy.context.scene.blendermcp_hunyuan3d_secret_key
+
+            if not secret_id or not secret_key:
+                return {"error": "SecretId or SecretKey is not given"}
+            if not job_id:
+                return {"error": "JobId is required"}
+
+            service = "hunyuan"
+            action = "Describe3DSmartTopologyJob"
+            version = "2023-09-01"
+            region = "ap-singapore"
+
+            headParams = {
+                "Action": action,
+                "Version": version,
+                "Region": region,
+            }
+
+            clean_job_id = job_id.removeprefix("retopo_")
+            data = {
+                "JobId": clean_job_id
+            }
+
+            headers, endpoint = self.get_tencent_cloud_sign_headers(
+                "POST", "/", headParams, data, service, region, secret_id, secret_key,
+                host="hunyuan.intl.tencentcloudapi.com"
+            )
+
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                data=json.dumps(data)
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            return {
+                "error": f"API request failed with status {response.status_code}: {response.text}"
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def import_retopologized_asset_hunyuan(self, name: str, obj_file_url: str, replace_object: str = None):
+        """Download and import a retopologized OBJ file, optionally replacing an existing object."""
+        if not obj_file_url:
+            return {"error": "obj_file_url is required"}
+
+        if not re.match(r'^https?://', obj_file_url, re.IGNORECASE):
+            return {"error": "Invalid URL format. Must start with http:// or https://"}
+
+        temp_dir = tempfile.mkdtemp(prefix="retopo_obj_")
+        obj_file_path = osp.join(temp_dir, "retopo_model.obj")
+
+        try:
+            # Download the OBJ file directly (retopology returns raw OBJ, not ZIP)
+            response = requests.get(obj_file_url, stream=True)
+            response.raise_for_status()
+            with open(obj_file_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+            if not osp.exists(obj_file_path):
+                return {"succeed": False, "error": "Failed to download OBJ file"}
+
+            # Capture original object's transform if replacing
+            original_location = None
+            original_rotation = None
+            original_scale = None
+            original_hires_name = None
+            if replace_object:
+                orig_obj = bpy.data.objects.get(replace_object)
+                if orig_obj:
+                    original_location = [orig_obj.location.x, orig_obj.location.y, orig_obj.location.z]
+                    original_rotation = [orig_obj.rotation_euler.x, orig_obj.rotation_euler.y, orig_obj.rotation_euler.z]
+                    original_scale = [orig_obj.scale.x, orig_obj.scale.y, orig_obj.scale.z]
+                    # Hide the original instead of deleting (preserves textures for baking)
+                    orig_obj.hide_viewport = True
+                    orig_obj.hide_render = True
+                    orig_obj.name = f"{replace_object}_original_hires"
+                    original_hires_name = orig_obj.name
+
+            # Import the OBJ file
+            if bpy.app.version >= (4, 0, 0):
+                bpy.ops.wm.obj_import(filepath=obj_file_path)
+            else:
+                bpy.ops.import_scene.obj(filepath=obj_file_path)
+
+            imported_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+            if not imported_objs:
+                return {"succeed": False, "error": "No mesh objects imported"}
+
+            obj = imported_objs[0]
+            if name:
+                obj.name = name
+
+            # Restore original transform if replacing
+            if original_location is not None:
+                obj.location = original_location
+                obj.rotation_euler = original_rotation
+                obj.scale = original_scale
+
+            # Collect mesh stats for polycount comparison
+            mesh = obj.data
+            result = {
+                "succeed": True,
+                "name": obj.name,
+                "type": obj.type,
+                "location": [obj.location.x, obj.location.y, obj.location.z],
+                "rotation": [obj.rotation_euler.x, obj.rotation_euler.y, obj.rotation_euler.z],
+                "scale": [obj.scale.x, obj.scale.y, obj.scale.z],
+                "mesh_stats": {
+                    "vertices": len(mesh.vertices),
+                    "edges": len(mesh.edges),
+                    "polygons": len(mesh.polygons),
+                },
+            }
+
+            if obj.type == "MESH":
+                bounding_box = self._get_aabb(obj)
+                result["world_bounding_box"] = bounding_box
+
+            if original_hires_name:
+                result["original_hires_name"] = original_hires_name
+
+            return result
+        except Exception as e:
+            return {"succeed": False, "error": str(e)}
+        finally:
+            try:
+                if os.path.exists(obj_file_path):
+                    os.remove(obj_file_path)
+            except Exception as e:
+                print(f"Failed to clean up temporary file {obj_file_path}: {e}")
+
+    def bake_textures_to_retopo(
+        self,
+        source_object: str,
+        target_object: str,
+        bake_type: str = "DIFFUSE",
+        resolution: int = 2048,
+        cage_extrusion: float = 0.5,
+        delete_source_after: bool = False,
+    ):
+        """Bake textures from a source (hi-res) mesh onto a target (retopo) mesh using Selected-to-Active."""
+        # Validate objects
+        src = bpy.data.objects.get(source_object)
+        tgt = bpy.data.objects.get(target_object)
+        if not src:
+            return {"succeed": False, "error": f"Source object '{source_object}' not found"}
+        if not tgt:
+            return {"succeed": False, "error": f"Target object '{target_object}' not found"}
+        if src.type != 'MESH' or tgt.type != 'MESH':
+            return {"succeed": False, "error": "Both source and target must be MESH objects"}
+
+        # Save current render engine to restore later
+        original_engine = bpy.context.scene.render.engine
+        original_samples = None
+        if hasattr(bpy.context.scene, 'cycles'):
+            original_samples = bpy.context.scene.cycles.samples
+
+        try:
+            # Unhide source if hidden
+            src.hide_viewport = False
+            src.hide_render = False
+
+            # Auto Smart UV Project on target if it has no UVs
+            if not tgt.data.uv_layers:
+                print("Target has no UVs — running Smart UV Project")
+                bpy.ops.object.select_all(action='DESELECT')
+                tgt.select_set(True)
+                bpy.context.view_layer.objects.active = tgt
+                bpy.ops.object.mode_set(mode='EDIT')
+                bpy.ops.mesh.select_all(action='SELECT')
+                bpy.ops.uv.smart_project(angle_limit=1.15192, island_margin=0.02)
+                bpy.ops.object.mode_set(mode='OBJECT')
+
+            # Switch to Cycles (required for baking)
+            bpy.context.scene.render.engine = 'CYCLES'
+            bpy.context.scene.cycles.device = 'GPU'
+            bpy.context.scene.cycles.samples = 64  # Enough for a clean bake
+
+            # Create or reuse bake image
+            img_name = f"{tgt.name}_bake_{bake_type.lower()}"
+            bake_img = bpy.data.images.get(img_name)
+            if bake_img:
+                bpy.data.images.remove(bake_img)
+            bake_img = bpy.data.images.new(img_name, width=resolution, height=resolution, alpha=True)
+
+            # Ensure target has a material with an Image Texture node set as active
+            if not tgt.data.materials:
+                mat = bpy.data.materials.new(name=f"{tgt.name}_BakedMat")
+                mat.use_nodes = True
+                tgt.data.materials.append(mat)
+            mat = tgt.data.materials[0]
+            if not mat.use_nodes:
+                mat.use_nodes = True
+            nodes = mat.node_tree.nodes
+            links = mat.node_tree.links
+
+            # Remove existing bake image node if any
+            for n in nodes:
+                if n.type == 'TEX_IMAGE' and n.image and n.image.name == img_name:
+                    nodes.remove(n)
+
+            img_node = nodes.new('ShaderNodeTexImage')
+            img_node.image = bake_img
+            img_node.name = img_name
+            img_node.label = img_name
+            # Set as active node (Blender bakes into the active Image Texture node)
+            nodes.active = img_node
+
+            # Selection: source selected, target active
+            bpy.ops.object.select_all(action='DESELECT')
+            src.select_set(True)
+            tgt.select_set(True)
+            bpy.context.view_layer.objects.active = tgt
+
+            # Configure and run the bake
+            bpy.context.scene.render.bake.use_selected_to_active = True
+            bpy.context.scene.render.bake.cage_extrusion = cage_extrusion
+
+            if bake_type == "DIFFUSE":
+                bpy.context.scene.render.bake.use_pass_direct = False
+                bpy.context.scene.render.bake.use_pass_indirect = False
+                bpy.context.scene.render.bake.use_pass_color = True
+
+            print(f"Starting bake: {bake_type} from '{source_object}' → '{target_object}' at {resolution}px")
+            bpy.ops.object.bake(type=bake_type)
+            print("Bake complete")
+
+            # Pack image into .blend so it's not lost
+            bake_img.pack()
+
+            # Wire baked texture into Principled BSDF
+            principled = None
+            for n in nodes:
+                if n.type == 'BSDF_PRINCIPLED':
+                    principled = n
+                    break
+            if not principled:
+                principled = nodes.new('ShaderNodeBsdfPrincipled')
+                output_node = None
+                for n in nodes:
+                    if n.type == 'OUTPUT_MATERIAL':
+                        output_node = n
+                        break
+                if output_node:
+                    links.new(principled.outputs['BSDF'], output_node.inputs['Surface'])
+
+            # Connect based on bake type
+            if bake_type in ("DIFFUSE", "COMBINED"):
+                links.new(img_node.outputs['Color'], principled.inputs['Base Color'])
+            elif bake_type == "NORMAL":
+                normal_map = nodes.new('ShaderNodeNormalMap')
+                links.new(img_node.outputs['Color'], normal_map.inputs['Color'])
+                links.new(normal_map.outputs['Normal'], principled.inputs['Normal'])
+                img_node.image.colorspace_settings.name = 'Non-Color'
+            elif bake_type == "ROUGHNESS":
+                links.new(img_node.outputs['Color'], principled.inputs['Roughness'])
+                img_node.image.colorspace_settings.name = 'Non-Color'
+
+            # Re-hide or delete source
+            if delete_source_after:
+                bpy.data.objects.remove(src, do_unlink=True)
+                source_status = "deleted"
+            else:
+                src.hide_viewport = True
+                src.hide_render = True
+                source_status = "hidden"
+
+            return {
+                "succeed": True,
+                "bake_type": bake_type,
+                "resolution": resolution,
+                "image_name": img_name,
+                "target_object": tgt.name,
+                "source_status": source_status,
+                "material": mat.name,
+            }
+
+        except Exception as e:
+            traceback.print_exc()
+            return {"succeed": False, "error": str(e)}
+        finally:
+            # Restore original render engine and settings
+            bpy.context.scene.render.engine = original_engine
+            if original_samples is not None and hasattr(bpy.context.scene, 'cycles'):
+                bpy.context.scene.cycles.samples = original_samples
+
     #endregion
 
 # Blender Addon Preferences
